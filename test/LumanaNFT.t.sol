@@ -25,30 +25,37 @@ contract LumanaNFTTest is Test {
         shares[0] = 5000;
         shares[1] = 5000;
         splitter = new RoyaltySplitter(recipients, shares, 500);
-        uint256[3] memory prices = [uint256(1000000), 2000000, 3000000];
-        nft = new LumanaNFT("LumanaNFT", "LUM", address(usdt), prices, address(splitter));
+        uint256 price = 1; // 1 USDT (whole units)
+        nft = new LumanaNFT("LumanaNFT", "LUM", address(usdt), price, address(splitter));
         nft.grantRole(nft.STATE_UPDATER_ROLE(), updater);
-        usdt.mint(user, 400000000); // 400 USDT
+        usdt.mint(user, 62000000); // 62 USDT for testTotalSupplyInvariant
         vm.stopPrank();
     }
 
     function testMintWithUSDT() public {
         vm.startPrank(user);
-        usdt.approve(address(nft), 1000000);
-        nft.mintWithUSDT(LumanaNFT.Tier.TIER1, 1);
+        uint256 totalPrice = nft.price() * 1 * (10 ** nft.decimals()); // 1 * 1 * 1000000 = 1000000
+        usdt.approve(address(nft), totalPrice);
+        nft.mintWithUSDT(1);
         assertEq(nft.ownerOf(1), user);
-        assertEq(nft.tierSupply(LumanaNFT.Tier.TIER1), 1);
+        assertEq(nft.supply(), 1);
         vm.stopPrank();
     }
 
     function testAdvanceState() public {
-        vm.prank(updater);
+        vm.warp(10000); // Set block.timestamp to 10000 to avoid underflow
+        vm.prank(owner);
+        nft.setLaunchTime(10000 - 63 * 60 - 1); // Set launch time to just over 62 minutes ago
+        vm.warp(10001); // Advance time by 1 second to ensure condition
         nft.advanceState();
-        assertEq(nft.currentState(), 1);
+        assertEq(nft.getCurrentState(), 1);
     }
 
     function testCannotAdvanceBeyondMax() public {
-        vm.startPrank(updater);
+        vm.warp(2000000000); // Set block.timestamp to a large value to avoid underflow
+        vm.prank(owner);
+        nft.setLaunchTime(2000000000 - 62 * 365 * 24 * 3600); // Set launch time to 62 years ago
+        vm.startPrank(owner);
         for (uint8 i = 0; i < 6; i++) {
             nft.advanceState();
         }
@@ -59,19 +66,17 @@ contract LumanaNFTTest is Test {
 
     function testTotalSupplyInvariant() public {
         vm.startPrank(user);
-        usdt.approve(address(nft), 186000000); // Enough for all
-        nft.mintWithUSDT(LumanaNFT.Tier.TIER1, 62);
-        usdt.approve(address(nft), 372000000); // Re-approve for TIER2 and TIER3
-        nft.mintWithUSDT(LumanaNFT.Tier.TIER2, 62);
-        nft.mintWithUSDT(LumanaNFT.Tier.TIER3, 62);
-        assertEq(nft.totalSupply(), 186);
+        uint256 totalPrice = nft.price() * 62 * (10 ** nft.decimals()); // 62 * 1 * 1000000 = 62000000
+        usdt.approve(address(nft), totalPrice);
+        nft.mintWithUSDT(62);
+        assertEq(nft.totalSupply(), 62);
         vm.stopPrank();
     }
 
     function testRoyaltySplitter() public {
         vm.startPrank(user);
         usdt.approve(address(nft), 1000000);
-        nft.mintWithUSDT(LumanaNFT.Tier.TIER1, 1);
+        nft.mintWithUSDT(1);
         vm.stopPrank();
 
         vm.prank(owner);
@@ -88,7 +93,7 @@ contract LumanaNFTTest is Test {
         vm.startPrank(user);
         usdt.approve(address(nft), 1000000 * 63); // More than max
         vm.expectRevert(LumanaNFT.SoldOut.selector);
-        nft.mintWithUSDT(LumanaNFT.Tier.TIER1, 63);
+        nft.mintWithUSDT(63);
         vm.stopPrank();
     }
 }
