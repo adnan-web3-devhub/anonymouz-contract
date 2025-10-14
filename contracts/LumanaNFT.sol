@@ -186,7 +186,12 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
     }
 
     /// @notice Supports ERC-721, ERC-2981, ERC-4906
-    function supportsInterface(bytes4 interfaceId) public view override(ERC721, AccessControl, ERC2981, IERC165) returns (bool) {
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC721, AccessControl, ERC2981, IERC165)
+        returns (bool)
+    {
         return super.supportsInterface(interfaceId) || interfaceId == type(IERC4906).interfaceId;
     }
 

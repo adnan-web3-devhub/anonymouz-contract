@@ -29,11 +29,7 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
     /// @param _recipients Array of recipient addresses
     /// @param _shares Array of shares (basis points, e.g., 5000 = 50%)
     /// @param _totalRoyaltyBps Total royalty in basis points (e.g., 500 = 5%)
-    constructor(
-        address[] memory _recipients,
-        uint256[] memory _shares,
-        uint256 _totalRoyaltyBps
-    ) {
+    constructor(address[] memory _recipients, uint256[] memory _shares, uint256 _totalRoyaltyBps) {
         if (_recipients.length != _shares.length || _recipients.length == 0) revert InvalidRecipients();
         uint256 total = 0;
         for (uint256 i = 0; i < _shares.length; i++) {
