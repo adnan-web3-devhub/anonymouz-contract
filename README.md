@@ -8,17 +8,21 @@ Production-grade smart contracts for the "4 THA LUMANA’I" film project, featur
 
 #### LumanaNFT.sol
 - **ERC-721** with dynamic metadata via ERC-4906
-- **Tiered Minting**: 3 tiers (TIER1: 1M USDT, TIER2: 2M USDT, TIER3: 3M USDT), 62 NFTs per tier (186 total)
-- **State Evolution**: 7 global states (0-6), advanced by automation
+- **Tiered Minting**: 3 tiers (Tier1: $6,200, Tier2: $620, Tier3: $62 USDT), 62 NFTs per tier (186 total)
+- **State Evolution**: 7 global states (0-6), advanced by Chainlink Automation
 - **Royalty Support**: EIP-2981 with pull-based distribution
-- **Access Control**: Multi-sig admin, STATE_UPDATER role for state management
+- **Access Control**: Multi-sig admin, STATE_UPDATER role for Chainlink
 - **Pausable**: Emergency pause functionality
+- **Chainlink Automation**: Automatic time-based state progression
+- **Lit Protocol**: NFT-gated content access support
 
 #### RoyaltySplitter.sol
 - **Pull-based Royalties**: Recipients withdraw their share manually
 - **Immutable Recipients**: Fixed shares set at deployment
 - **Multi-token Support**: ETH and ERC20 royalties
-- **Proportional Distribution**: Shares allocated by basis points (500 = 5%)
+- **Proportional Distribution**: Shares allocated by basis points (10000 = 100%)
+- **Batch Withdrawal**: Gas-efficient multi-token withdrawal
+- **Fixed Bug**: Removed double royalty deduction
 
 ### Security Features
 - **ReentrancyGuard**: Prevents reentrancy attacks
@@ -47,37 +51,54 @@ ETHERSCAN_API_KEY=your_etherscan_api_key
 
 1. **Install Dependencies**
    ```bash
-   npm install
+   npm install --legacy-peer-deps
    ```
 
 2. **Compile Contracts**
    ```bash
-   forge build
+   forge build  # or npm run build
    ```
 
-3. **Run Tests**
+3. **Deploy RoyaltySplitter** (Ethereum)
    ```bash
-   forge test
+   npx hardhat run scripts/deployRoyaltySplitter.ts --network mainnet
    ```
 
-4. **Deploy to Testnet**
+4. **Deploy Tier 1 NFT** (Ethereum)
    ```bash
-   npx hardhat run scripts/deploy.ts --network sepolia
+   npx hardhat run scripts/deployTier1.ts --network mainnet
    ```
 
-5. **Set Base URIs**
+5. **Deploy Tier 2 & 3 NFTs** (Polygon)
    ```bash
-   npx hardhat run scripts/setBaseURIs.ts --network sepolia
+   npx hardhat run scripts/deployTier2.ts --network polygon
+   npx hardhat run scripts/deployTier3.ts --network polygon
    ```
 
-6. **Grant Roles**
+6. **Set Launch Time** (all tiers - same timestamp)
    ```bash
-   npx hardhat run scripts/grantRoles.ts --network sepolia
+   npx hardhat run scripts/setLaunchTime.ts --network mainnet
+   npx hardhat run scripts/setLaunchTime.ts --network polygon
    ```
 
-7. **Transfer Ownership**
+7. **Configure Chainlink Automation**
    ```bash
-   npx hardhat run scripts/transferOwnership.ts --network sepolia
+   NFT_ADDRESS=<tier1> CHAINLINK_FORWARDER=<address> \
+     npx hardhat run scripts/configureChainlinkAutomation.ts --network mainnet
+   
+   # Repeat for Tier 2 & 3 on Polygon
+   ```
+
+8. **Set Base URIs**
+   ```bash
+   npx hardhat run scripts/setBaseURIs.ts --network mainnet
+   npx hardhat run scripts/setBaseURIs.ts --network polygon
+   ```
+
+9. **Transfer Ownership**
+   ```bash
+   npx hardhat run scripts/transferOwnership.ts --network mainnet
+   npx hardhat run scripts/transferOwnership.ts --network polygon
    ```
 
 ### Post-Deployment Configuration
@@ -124,24 +145,58 @@ ETHERSCAN_API_KEY=your_etherscan_api_key
 
 ### Minting Flow
 1. User approves USDT spending
-2. Call `mintWithUSDT(tier, quantity)`
+2. Call `mintWithUSDT(quantity)`
 3. Contract validates supply, balance, allowance
 4. Transfers USDT, mints NFTs, emits events
 
 ### State Evolution
-- States advance from 0 to 6 automatically
+- States advance from 0 to 6 automatically via Chainlink Automation
 - Each advance triggers ERC-4906 metadata update
-- Off-chain services monitor and update metadata
+- View functions: `getCurrentState()`, `getNextRevealTime()`, `getTimeUntilNextState()`
+
+### Chainlink Automation
+- Registers upkeep for each tier contract
+- Calls `performUpkeep()` when time elapsed
+- Triggers state advancement automatically
+- No manual intervention required
+
+### Lit Protocol Integration
+- Use `isEligibleForContent(user, requiredState)` to check access
+- Returns true if user owns NFT and current state >= required state
+- Integrate with Lit Actions for decryption key release
+- Example flow:
+  ```typescript
+  const eligible = await nft.isEligibleForContent(userAddress, 1);
+  if (eligible) {
+    // Request decryption key from Lit Protocol
+    const key = await litProtocol.getDecryptionKey({...});
+    // Decrypt and play video
+  }
+  ```
 
 ### Royalty Distribution
 - Royalties accumulate in RoyaltySplitter
 - Recipients call `withdrawETH()` or `withdrawERC20(token)`
-- Proportional to configured shares
+- Use `withdrawBatch(tokens[])` for gas efficiency
+- Check balances: `getAllPending(recipient, tokens[])`
 
 ### Metadata Updates
 - Listen for `BatchMetadataUpdate` events
 - Refresh metadata for all tokens when state changes
 - Base URI per state enables different artwork per evolution
+
+### Helper Functions for dApp
+```typescript
+// Get all tokens owned by user
+const tokens = await nft.getOwnerTokens(userAddress);
+
+// Get next reveal countdown
+const timeRemaining = await nft.getTimeUntilNextState();
+const nextTimestamp = await nft.getNextRevealTime();
+
+// Check current state
+const currentState = await nft.currentState();
+```
 
 ## Testing & Coverage
 

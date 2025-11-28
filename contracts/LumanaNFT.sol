@@ -10,10 +10,18 @@ import "@openzeppelin/contracts/interfaces/IERC4906.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
-/// @title LumanaNFT - Dynamic NFT for "4 THA LUMANA’I" Film
+/// @title LumanaNFT - Dynamic NFT for "4 THA LUMANA'I" Film
 /// @notice ERC-721 with tiered USDT minting, global state evolutions, and royalty support
-contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981, IERC4906 {
-    bytes32 public constant STATE_UPDATER_ROLE = keccak256("STATE_UPDATER_ROLE");
+contract LumanaNFT is
+    ERC721,
+    AccessControl,
+    ReentrancyGuard,
+    Pausable,
+    ERC2981,
+    IERC4906
+{
+    bytes32 public constant STATE_UPDATER_ROLE =
+        keccak256("STATE_UPDATER_ROLE");
 
     uint8 public constant MAX_STATE = 6;
     uint256 public constant MAX_SUPPLY = 62;
@@ -42,6 +50,8 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
     error Unauthorized();
     error InvalidQuantity();
     error TransferFailed();
+    error CannotAdvanceYet();
+    error LaunchTimeNotSet();
 
     /// @param _name NFT name
     /// @param _symbol NFT symbol
@@ -56,9 +66,12 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
         address _royaltySplitter
     ) ERC721(_name, _symbol) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(STATE_UPDATER_ROLE, msg.sender); // Grant to deployer, transfer to Chainlink later
+
         usdtAddress = _usdtAddress;
         price = _price;
         decimals = IERC20Metadata(usdtAddress).decimals();
+
         // Set intervals: 62 minutes, 62 hours, 62 days, 62 weeks, 62 months (approx 30 days), 62 years (approx 365 days)
         intervals[0] = 62 * 60; // minutes
         intervals[1] = 62 * 3600; // hours
@@ -66,22 +79,27 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
         intervals[3] = 62 * 604800; // weeks
         intervals[4] = 62 * 2592000; // months (30 days)
         intervals[5] = 62 * 31536000; // years (365 days)
-        currentState = 0; // Explicitly set to 0
+
+        currentState = 0;
         royaltySplitter = _royaltySplitter;
         _setDefaultRoyalty(_royaltySplitter, 500); // 5% royalty
     }
 
     /// @notice Mint NFTs with USDT payment
     /// @param quantity Number of NFTs to mint
-    function mintWithUSDT(uint256 quantity) external nonReentrant whenNotPaused {
+    function mintWithUSDT(
+        uint256 quantity
+    ) external nonReentrant whenNotPaused {
         if (quantity == 0) revert InvalidQuantity();
         if (supply + quantity > MAX_SUPPLY) revert SoldOut();
 
         uint256 totalPrice = price * quantity * (10 ** decimals);
         IERC20 usdt = IERC20(usdtAddress);
 
-        if (usdt.allowance(msg.sender, address(this)) < totalPrice) revert InsufficientAllowance();
-        if (usdt.balanceOf(msg.sender) < totalPrice) revert InsufficientBalance();
+        if (usdt.allowance(msg.sender, address(this)) < totalPrice)
+            revert InsufficientAllowance();
+        if (usdt.balanceOf(msg.sender) < totalPrice)
+            revert InsufficientBalance();
 
         bool success = usdt.transferFrom(msg.sender, address(this), totalPrice);
         if (!success) revert TransferFailed();
@@ -95,29 +113,67 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
         emit Minted(msg.sender, quantity, supply);
     }
 
-    /// @notice Advance to next state (public, time-based)
-    function advanceState() external {
-        if (launchTime == 0) revert InvalidState(); // Launch time not set
+    /// @notice Advance to next state (only STATE_UPDATER_ROLE)
+    /// @dev Called by Chainlink Automation via performUpkeep
+    function advanceState() public onlyRole(STATE_UPDATER_ROLE) {
+        if (launchTime == 0) revert LaunchTimeNotSet();
+        if (currentState >= MAX_STATE) revert InvalidState();
+
+        // Calculate time needed to reach NEXT state
         uint256 elapsed = block.timestamp - launchTime;
-        uint8 current = currentState;
-        uint256 cumulative = 0;
-        for (uint8 i = 0; i < current; i++) {
-            cumulative += intervals[i];
+        uint256 requiredTime = 0;
+
+        for (uint8 i = 0; i <= currentState; i++) {
+            requiredTime += intervals[i];
         }
-        if (elapsed < cumulative) revert InvalidState(); // Not enough time passed
-        if (current >= MAX_STATE) revert InvalidState();
+
+        if (elapsed < requiredTime) revert CannotAdvanceYet();
+
         uint8 oldState = currentState;
-        currentState = currentState + 1;
+        currentState++;
+
         emit StateAdvanced(oldState, currentState, block.timestamp);
         emit BatchMetadataUpdate(1, MAX_SUPPLY); // ERC-4906
     }
 
-    /// @notice Get current global state (0-6)
+    /// @notice Check if upkeep is needed (Chainlink Automation)
+    function checkUpkeep(
+        bytes calldata
+    ) external view returns (bool upkeepNeeded, bytes memory performData) {
+        upkeepNeeded = _canAdvanceState();
+        performData = "";
+        return (upkeepNeeded, performData);
+    }
+
+    /// @notice Perform upkeep (Chainlink Automation)
+    function performUpkeep(bytes calldata) external {
+        if (_canAdvanceState()) {
+            advanceState();
+        }
+    }
+
+    /// @notice Check if state can be advanced
+    function _canAdvanceState() internal view returns (bool) {
+        if (launchTime == 0 || currentState >= MAX_STATE) return false;
+
+        uint256 elapsed = block.timestamp - launchTime;
+        uint256 requiredTime = 0;
+
+        for (uint8 i = 0; i <= currentState; i++) {
+            requiredTime += intervals[i];
+        }
+
+        return elapsed >= requiredTime;
+    }
+
+    /// @notice Get current global state (0-6) with real-time calculation
     function getCurrentState() external view returns (uint8) {
         if (launchTime == 0) return currentState;
+
         uint256 elapsed = block.timestamp - launchTime;
         uint8 state = 0;
         uint256 cumulative = 0;
+
         for (uint8 i = 0; i < 6; i++) {
             cumulative += intervals[i];
             if (elapsed >= cumulative) {
@@ -126,51 +182,116 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
                 break;
             }
         }
+
         return state > MAX_STATE ? MAX_STATE : state;
+    }
+
+    /// @notice Check if user can access content at required state (Lit Protocol)
+    /// @param user Address to check
+    /// @param requiredState Minimum state needed for content access
+    /// @return bool True if user owns NFT and current state >= required state
+    function isEligibleForContent(
+        address user,
+        uint8 requiredState
+    ) external view returns (bool) {
+        if (balanceOf(user) == 0) return false;
+        return currentState >= requiredState;
+    }
+
+    /// @notice Get timestamp of next state reveal
+    /// @return uint256 Timestamp when next state will be available (0 if max state reached)
+    function getNextRevealTime() external view returns (uint256) {
+        if (currentState >= MAX_STATE || launchTime == 0) return 0;
+
+        uint256 timeNeeded = 0;
+        for (uint8 i = 0; i <= currentState; i++) {
+            timeNeeded += intervals[i];
+        }
+
+        return launchTime + timeNeeded;
+    }
+
+    /// @notice Get seconds until next state reveal
+    /// @return uint256 Seconds remaining (0 if ready or max state reached)
+    function getTimeUntilNextState() external view returns (uint256) {
+        if (currentState >= MAX_STATE || launchTime == 0) return 0;
+
+        uint256 nextTime = this.getNextRevealTime();
+        if (nextTime == 0 || block.timestamp >= nextTime) return 0;
+
+        return nextTime - block.timestamp;
+    }
+
+    /// @notice Get all token IDs owned by an address
+    /// @param owner Address to query
+    /// @return uint256[] Array of token IDs owned by the address
+    function getOwnerTokens(
+        address owner
+    ) external view returns (uint256[] memory) {
+        uint256 tokenCount = balanceOf(owner);
+        if (tokenCount == 0) return new uint256[](0);
+
+        uint256[] memory tokens = new uint256[](tokenCount);
+        uint256 index = 0;
+
+        for (uint256 i = 1; i <= supply && index < tokenCount; i++) {
+            if (_ownerOf(i) == owner) {
+                tokens[index] = i;
+                index++;
+            }
+        }
+
+        return tokens;
     }
 
     /// @notice Set launch time (only DEFAULT_ADMIN_ROLE)
     /// @param _launchTime Timestamp when evolution starts
-    function setLaunchTime(uint256 _launchTime) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setLaunchTime(
+        uint256 _launchTime
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         launchTime = _launchTime;
     }
 
     /// @notice Set base URI for a state (only DEFAULT_ADMIN_ROLE)
     /// @param state The state (0-6)
     /// @param uri The base URI for that state
-    function setBaseURI(uint8 state, string memory uri) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setBaseURI(
+        uint8 state,
+        string memory uri
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (state > MAX_STATE) revert InvalidState();
         baseURIByState[state] = uri;
         emit URIRootUpdated(state, uri);
     }
 
     /// @notice Get token URI based on current state
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+    function tokenURI(
+        uint256 tokenId
+    ) public view override returns (string memory) {
         _requireOwned(tokenId);
-        uint8 state = currentState;
-        if (launchTime != 0) {
-            uint256 elapsed = block.timestamp - launchTime;
-            uint256 cumulative = 0;
-            for (uint8 i = 0; i < 6; i++) {
-                cumulative += intervals[i];
-                if (elapsed >= cumulative) {
-                    state = i + 1;
-                } else {
-                    break;
-                }
-            }
-            if (state > MAX_STATE) state = MAX_STATE;
-        }
-        string memory base = baseURIByState[state];
-        return bytes(base).length > 0 ? string(abi.encodePacked(base, _toString(tokenId))) : "";
+        string memory base = baseURIByState[currentState];
+        return
+            bytes(base).length > 0
+                ? string(abi.encodePacked(base, _toString(tokenId)))
+                : "";
     }
 
-    /// @notice Pause minting (pre-launch only, DEFAULT_ADMIN_ROLE)
+    /// @notice Emergency pause minting (only DEFAULT_ADMIN_ROLE)
+    function emergencyPause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Emergency unpause minting (only DEFAULT_ADMIN_ROLE)
+    function emergencyUnpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    /// @notice Pause minting (only DEFAULT_ADMIN_ROLE)
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
 
-    /// @notice Unpause minting (pre-launch only, DEFAULT_ADMIN_ROLE)
+    /// @notice Unpause minting (only DEFAULT_ADMIN_ROLE)
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
@@ -186,13 +307,17 @@ contract LumanaNFT is ERC721, AccessControl, ReentrancyGuard, Pausable, ERC2981,
     }
 
     /// @notice Supports ERC-721, ERC-2981, ERC-4906
-    function supportsInterface(bytes4 interfaceId)
+    function supportsInterface(
+        bytes4 interfaceId
+    )
         public
         view
         override(ERC721, AccessControl, ERC2981, IERC165)
         returns (bool)
     {
-        return super.supportsInterface(interfaceId) || interfaceId == type(IERC4906).interfaceId;
+        return
+            super.supportsInterface(interfaceId) ||
+            interfaceId == type(IERC4906).interfaceId;
     }
 
     /// @dev Internal function to get next token ID
