@@ -1,19 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title RoyaltySplitter - Pull-based royalty distribution for ETH and ERC20
-/// @notice Immutable recipients and shares, supports ETH and ERC20 withdrawals
-contract RoyaltySplitter is AccessControl, ReentrancyGuard {
+/// @notice Immutable recipients and shares, supports ETH and ERC20 withdrawals.
+/// @dev Handles ROYALTIES ONLY. ERC20 crediting is based on measured on-chain receipts,
+///      never a caller-supplied amount. DEFAULT_ADMIN_ROLE uses two-step delayed transfer
+///      ({AccessControlDefaultAdminRules}); set it to a multisig after deployment.
+contract RoyaltySplitter is AccessControlDefaultAdminRules, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    /// @notice Delay enforced on the two-step DEFAULT_ADMIN_ROLE transfer.
+    uint48 public constant ADMIN_TRANSFER_DELAY = 3 days;
+
     address[] public recipients;
     uint256[] public shares;
     uint256 public totalShares;
 
     mapping(address => uint256) public pendingETH;
     mapping(address => mapping(IERC20 => uint256)) public pendingERC20;
+
+    /// @notice Total ERC20 credited to recipients but not yet withdrawn (per token).
+    /// @dev Used to compute the un-accounted surplus that rescueERC20 may sweep.
+    mapping(IERC20 => uint256) public totalPendingERC20;
 
     // Events
     event RoyaltyReceived(address indexed token, uint256 amount);
@@ -22,16 +35,23 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
         address indexed token,
         uint256 amount
     );
+    event Rescued(address indexed token, address indexed to, uint256 amount);
 
     // Custom errors
     error InvalidRecipients();
     error InvalidShares();
     error NoPendingBalance();
     error TransferFailed();
+    error NoSurplus();
+    error ZeroAddress();
+    error NothingToDistribute();
 
     /// @param _recipients Array of recipient addresses
     /// @param _shares Array of shares (basis points, e.g., 5000 = 50%)
-    constructor(address[] memory _recipients, uint256[] memory _shares) {
+    constructor(
+        address[] memory _recipients,
+        uint256[] memory _shares
+    ) AccessControlDefaultAdminRules(ADMIN_TRANSFER_DELAY, msg.sender) {
         if (_recipients.length != _shares.length || _recipients.length == 0)
             revert InvalidRecipients();
         uint256 total = 0;
@@ -44,7 +64,7 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
         recipients = _recipients;
         shares = _shares;
         totalShares = total;
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        // DEFAULT_ADMIN_ROLE is granted to msg.sender by AccessControlDefaultAdminRules.
     }
 
     /// @notice Receive ETH royalties
@@ -53,12 +73,25 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
         emit RoyaltyReceived(address(0), msg.value);
     }
 
-    /// @notice Distribute ERC20 royalties (called by NFT contract on transfer)
-    /// @param token ERC20 token address
-    /// @param amount Amount received
-    function distributeERC20(IERC20 token, uint256 amount) external {
-        _distributeERC20(token, amount);
-        emit RoyaltyReceived(address(token), amount);
+    /// @notice Credit newly-arrived ERC20 royalties across recipients by shares.
+    /// @dev Trustless: distributes only the MEASURED balance that has arrived since the
+    ///      last accounting (balanceOf - totalPendingERC20). No caller-supplied amount can
+    ///      be forged, so an attacker cannot over-credit. Integer-division dust stays as
+    ///      un-accounted surplus recoverable via rescueERC20.
+    /// @param token ERC20 token to distribute
+    function distributeERC20(IERC20 token) external {
+        uint256 pull = token.balanceOf(address(this)) - totalPendingERC20[token];
+        if (pull == 0) revert NothingToDistribute();
+
+        uint256 distributed = 0;
+        for (uint256 i = 0; i < recipients.length; i++) {
+            uint256 share = (pull * shares[i]) / totalShares;
+            pendingERC20[recipients[i]][token] += share;
+            distributed += share;
+        }
+        totalPendingERC20[token] += distributed;
+
+        emit RoyaltyReceived(address(token), pull);
     }
 
     /// @notice Withdraw pending ETH
@@ -77,8 +110,8 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
         uint256 amount = pendingERC20[msg.sender][token];
         if (amount == 0) revert NoPendingBalance();
         pendingERC20[msg.sender][token] = 0;
-        bool success = token.transfer(msg.sender, amount);
-        if (!success) revert TransferFailed();
+        totalPendingERC20[token] -= amount;
+        token.safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, address(token), amount);
     }
 
@@ -131,11 +164,29 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
             uint256 amount = pendingERC20[msg.sender][tokens[i]];
             if (amount > 0) {
                 pendingERC20[msg.sender][tokens[i]] = 0;
-                bool success = tokens[i].transfer(msg.sender, amount);
-                if (!success) revert TransferFailed();
+                totalPendingERC20[tokens[i]] -= amount;
+                tokens[i].safeTransfer(msg.sender, amount);
                 emit Withdrawn(msg.sender, address(tokens[i]), amount);
             }
         }
+    }
+
+    /// @notice Sweep ERC20 surplus sent directly to the splitter (not via distributeERC20).
+    /// @dev Admin-gated. Can only move tokens beyond what recipients are owed
+    ///      (balance - totalPendingERC20), so accounted royalties are never touched.
+    /// @param token ERC20 token to rescue
+    /// @param to Recipient of the swept surplus
+    function rescueERC20(
+        IERC20 token,
+        address to
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 balance = token.balanceOf(address(this));
+        uint256 accounted = totalPendingERC20[token];
+        if (balance <= accounted) revert NoSurplus();
+        uint256 surplus = balance - accounted;
+        token.safeTransfer(to, surplus);
+        emit Rescued(address(token), to, surplus);
     }
 
     /// @dev Distribute ETH proportionally
@@ -145,16 +196,6 @@ contract RoyaltySplitter is AccessControl, ReentrancyGuard {
         for (uint256 i = 0; i < recipients.length; i++) {
             uint256 share = (amount * shares[i]) / totalShares;
             pendingETH[recipients[i]] += share;
-        }
-    }
-
-    /// @dev Distribute ERC20 proportionally
-    /// @notice Marketplaces send only the royalty amount (via EIP-2981), so we distribute 100% of received amount
-    /// Example: 10 WETH sale with 5% royalty → marketplace sends 0.5 WETH → we distribute full 0.5 WETH to recipients
-    function _distributeERC20(IERC20 token, uint256 amount) internal {
-        for (uint256 i = 0; i < recipients.length; i++) {
-            uint256 share = (amount * shares[i]) / totalShares;
-            pendingERC20[recipients[i]][token] += share;
         }
     }
 }
