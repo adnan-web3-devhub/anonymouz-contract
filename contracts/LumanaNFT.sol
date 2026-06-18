@@ -10,6 +10,11 @@ import "@openzeppelin/contracts/interfaces/IERC4906.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/// @dev Minimal view of the RoyaltySplitter used to split transferred funds in-tx.
+interface IRoyaltySplitter {
+    function distributeERC20Push(IERC20 token) external;
+}
+
 /// @title LumanaNFT - Dynamic NFT for "THA LUMANA'I"
 /// @notice ERC-721 with USDT minting, date-driven metadata states, and royalty support.
 /// @dev One tier per deployment. The same bytecode is deployed once per chain, each
@@ -51,15 +56,13 @@ contract LumanaNFT is
     address public usdtAddress;
     uint256 public supply;
     uint256 public price; // USDT price in whole units (e.g. 6200 for 6200 USDT)
-    address public royaltySplitter; // EIP-2981 royalty receiver (royalties only)
-    address public treasury; // receiver of collected mint revenue
+    address public royaltySplitter; // EIP-2981 receiver AND mint-revenue distributor
     mapping(uint8 => string) public baseURIByState; // states 1, 2, 3 only
 
     // Events
     event Minted(address indexed to, uint256 quantity, uint256 totalMinted);
     event URIRootUpdated(uint8 state, string uri);
     event Withdrawn(address indexed to, uint256 amount);
-    event TreasuryUpdated(address indexed treasury);
 
     // Custom errors
     error SoldOut();
@@ -72,6 +75,7 @@ contract LumanaNFT is
     error ZeroAddress();
     error InvalidPrice();
     error InvalidDecimals();
+    error NothingToWithdraw();
 
     /// @param _name NFT name
     /// @param _symbol NFT symbol
@@ -79,8 +83,8 @@ contract LumanaNFT is
     /// @param _usdtAddress USDT contract address on this chain
     /// @param _usdtDecimals Decimals of the USDT contract on this chain
     /// @param _price Price in whole USDT units (e.g. 6200 for 6200 USDT)
-    /// @param _royaltySplitter Address of the royalty splitter (EIP-2981 receiver)
-    /// @param _treasury Address that receives collected mint revenue
+    /// @param _royaltySplitter Address of the royalty splitter (EIP-2981 receiver and
+    ///        mint-revenue distributor)
     constructor(
         string memory _name,
         string memory _symbol,
@@ -88,8 +92,7 @@ contract LumanaNFT is
         address _usdtAddress,
         uint8 _usdtDecimals,
         uint256 _price,
-        address _royaltySplitter,
-        address _treasury
+        address _royaltySplitter
     )
         ERC721(_name, _symbol)
         AccessControlDefaultAdminRules(ADMIN_TRANSFER_DELAY, msg.sender)
@@ -97,7 +100,6 @@ contract LumanaNFT is
         if (_tier < 1 || _tier > 3) revert InvalidTier();
         if (_usdtAddress == address(0)) revert ZeroAddress();
         if (_royaltySplitter == address(0)) revert ZeroAddress();
-        if (_treasury == address(0)) revert ZeroAddress();
         if (_price == 0) revert InvalidPrice();
         if (_usdtDecimals > 18) revert InvalidDecimals();
 
@@ -109,7 +111,6 @@ contract LumanaNFT is
         usdtDecimals = _usdtDecimals;
         price = _price;
         royaltySplitter = _royaltySplitter;
-        treasury = _treasury;
         _setDefaultRoyalty(_royaltySplitter, 500); // 5% royalty
     }
 
@@ -120,7 +121,11 @@ contract LumanaNFT is
         return "ALI'I";
     }
 
-    /// @notice Mint NFTs with USDT payment
+    /// @notice Mint NFTs with USDT payment.
+    /// @dev Payment is sent straight to the royalty splitter, which immediately PUSHES each
+    ///      recipient's share to their wallet in the same transaction (no withdraw step, no
+    ///      pending balances). No USDT is ever held by this contract or left in the splitter.
+    ///      This function is `nonReentrant` and the splitter's push is also guarded.
     /// @param quantity Number of NFTs to mint
     function mintWithUSDT(
         uint256 quantity
@@ -136,7 +141,8 @@ contract LumanaNFT is
         if (usdt.balanceOf(msg.sender) < totalPrice)
             revert InsufficientBalance();
 
-        usdt.safeTransferFrom(msg.sender, address(this), totalPrice);
+        // Forward payment to the splitter, then push each recipient's share to their wallet.
+        usdt.safeTransferFrom(msg.sender, royaltySplitter, totalPrice);
 
         uint256 startTokenId = _nextTokenId();
         for (uint256 i = 0; i < quantity; i++) {
@@ -144,6 +150,7 @@ contract LumanaNFT is
         }
 
         supply += quantity;
+        IRoyaltySplitter(royaltySplitter).distributeERC20Push(usdt);
         emit Minted(msg.sender, quantity, supply);
     }
 
@@ -226,25 +233,20 @@ contract LumanaNFT is
         _unpause();
     }
 
-    /// @notice Withdraw collected mint revenue (USDT) to the treasury.
-    /// @dev Mint revenue goes to `treasury`, NOT the royalty splitter (royalties only).
-    function withdrawUSDT() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    /// @notice Safety sweep: route any stray USDT held by this contract to the royalty
+    ///         splitter, which pushes it to recipients by share in the same transaction.
+    /// @dev Normal mints forward payment to the splitter directly, so this contract should
+    ///      hold no USDT. This remains as a recovery path for USDT sent here by mistake.
+    ///      Routes the full balance to `royaltySplitter`, then calls its
+    ///      `distributeERC20Push` so funds land in recipient wallets immediately.
+    ///      `nonReentrant`, and the splitter's push is also guarded.
+    function withdrawUSDT() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         IERC20 usdt = IERC20(usdtAddress);
         uint256 balance = usdt.balanceOf(address(this));
-        if (balance > 0) {
-            usdt.safeTransfer(treasury, balance);
-            emit Withdrawn(treasury, balance);
-        }
-    }
-
-    /// @notice Update the treasury address (only DEFAULT_ADMIN_ROLE)
-    /// @param _treasury New treasury address (must be non-zero)
-    function setTreasury(
-        address _treasury
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (_treasury == address(0)) revert ZeroAddress();
-        treasury = _treasury;
-        emit TreasuryUpdated(_treasury);
+        if (balance == 0) revert NothingToWithdraw();
+        usdt.safeTransfer(royaltySplitter, balance);
+        IRoyaltySplitter(royaltySplitter).distributeERC20Push(usdt);
+        emit Withdrawn(royaltySplitter, balance);
     }
 
     /// @notice Supports ERC-721, ERC-2981, ERC-4906

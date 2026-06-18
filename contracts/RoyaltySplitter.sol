@@ -6,10 +6,14 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @title RoyaltySplitter - Pull-based royalty distribution for ETH and ERC20
-/// @notice Immutable recipients and shares, supports ETH and ERC20 withdrawals.
-/// @dev Handles ROYALTIES ONLY. ERC20 crediting is based on measured on-chain receipts,
-///      never a caller-supplied amount. DEFAULT_ADMIN_ROLE uses two-step delayed transfer
+/// @title RoyaltySplitter - Distribution for ETH and ERC20 (push + pull)
+/// @notice Immutable recipients and shares. Mint revenue is PUSHED straight to recipient
+///         wallets via {distributeERC20Push}; ETH and other ERC20 royalties use the
+///         pull-based credit/{withdrawERC20} path.
+/// @dev Distributes BOTH mint revenue (routed in by LumanaNFT) and secondary royalties
+///      (paid directly by marketplaces) across recipients by the same shares. ERC20 amounts
+///      are based on measured on-chain receipts, never a caller-supplied amount.
+///      DEFAULT_ADMIN_ROLE uses two-step delayed transfer
 ///      ({AccessControlDefaultAdminRules}); set it to a multisig after deployment.
 contract RoyaltySplitter is AccessControlDefaultAdminRules, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -73,11 +77,12 @@ contract RoyaltySplitter is AccessControlDefaultAdminRules, ReentrancyGuard {
         emit RoyaltyReceived(address(0), msg.value);
     }
 
-    /// @notice Credit newly-arrived ERC20 royalties across recipients by shares.
-    /// @dev Trustless: distributes only the MEASURED balance that has arrived since the
-    ///      last accounting (balanceOf - totalPendingERC20). No caller-supplied amount can
-    ///      be forged, so an attacker cannot over-credit. Integer-division dust stays as
-    ///      un-accounted surplus recoverable via rescueERC20.
+    /// @notice Credit newly-arrived ERC20 funds (mint revenue or secondary royalties)
+    ///         across recipients by shares.
+    /// @dev Trustless and permissionless: distributes only the MEASURED balance that has
+    ///      arrived since the last accounting (balanceOf - totalPendingERC20). No
+    ///      caller-supplied amount can be forged, so an attacker cannot over-credit.
+    ///      Integer-division dust stays as un-accounted surplus recoverable via rescueERC20.
     /// @param token ERC20 token to distribute
     function distributeERC20(IERC20 token) external {
         uint256 pull = token.balanceOf(address(this)) - totalPendingERC20[token];
@@ -92,6 +97,38 @@ contract RoyaltySplitter is AccessControlDefaultAdminRules, ReentrancyGuard {
         totalPendingERC20[token] += distributed;
 
         emit RoyaltyReceived(address(token), pull);
+    }
+
+    /// @notice Immediately PUSH newly-arrived ERC20 funds to each recipient's wallet by share.
+    /// @dev Like {distributeERC20} but transfers tokens out instead of crediting pending
+    ///      balances. Distributes only the MEASURED, un-accounted balance
+    ///      (balanceOf - totalPendingERC20), so it never touches funds already credited via
+    ///      the pull path. Integer-division dust is sent to the last recipient so the
+    ///      newly-arrived amount is drained completely (nothing left in the splitter).
+    ///      `nonReentrant`; uses {SafeERC20}. NOTE: a recipient that cannot receive the token
+    ///      (e.g. token-level freeze/blocklist) would make this revert — keep recipients as
+    ///      plain payout addresses. The pull-based {distributeERC20}/{withdrawERC20} remain
+    ///      available as a fallback.
+    /// @param token ERC20 token to distribute
+    function distributeERC20Push(IERC20 token) external nonReentrant {
+        uint256 amount = token.balanceOf(address(this)) - totalPendingERC20[token];
+        if (amount == 0) revert NothingToDistribute();
+
+        uint256 n = recipients.length;
+        uint256 distributed = 0;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 share;
+            if (i == n - 1) {
+                share = amount - distributed; // remainder + dust to last recipient
+            } else {
+                share = (amount * shares[i]) / totalShares;
+                distributed += share;
+            }
+            token.safeTransfer(recipients[i], share);
+            emit Withdrawn(recipients[i], address(token), share);
+        }
+
+        emit RoyaltyReceived(address(token), amount);
     }
 
     /// @notice Withdraw pending ETH

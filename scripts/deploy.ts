@@ -24,14 +24,12 @@ type ChainConfig = {
   price: number; // whole USDT units (e.g. 6200)
   usdtDecimals: number; // USDT decimals on THIS chain
   usdtAddress: string; // TODO: verify on explorer
-  treasury: string; // TODO: mint-revenue receiver (NOT the royalty splitter)
-  recipients: string[]; // TODO: royalty recipients
+  recipients: string[]; // TODO: royalty + mint-revenue recipients
   shares: number[]; // basis points, must sum to 10000
 };
 
 // ⚠️ Placeholders only. Do not invent addresses — replace and verify before mainnet.
 const TODO_USDT = "0x0000000000000000000000000000000000000000";
-const TODO_TREASURY = "0x0000000000000000000000000000000000000000";
 const TODO_RECIPIENT_A = "0x0000000000000000000000000000000000000000";
 const TODO_RECIPIENT_B = "0x0000000000000000000000000000000000000000";
 
@@ -41,7 +39,6 @@ const CONFIGS: Record<string, ChainConfig> = {
     price: 6200,
     usdtDecimals: 6, // Ethereum USDT = 6 decimals
     usdtAddress: TODO_USDT, // TODO: Ethereum USDT (verify, e.g. 0xdAC17F958D2ee523a2206206994597C13D831ec7)
-    treasury: TODO_TREASURY, // TODO: mint-revenue treasury (multisig)
     recipients: [TODO_RECIPIENT_A, TODO_RECIPIENT_B],
     shares: [5000, 5000],
   },
@@ -50,7 +47,6 @@ const CONFIGS: Record<string, ChainConfig> = {
     price: 620,
     usdtDecimals: 18, // BSC USDT (BSC-USD) = 18 decimals
     usdtAddress: TODO_USDT, // TODO: BSC USDT (verify on bscscan)
-    treasury: TODO_TREASURY, // TODO: mint-revenue treasury (multisig)
     recipients: [TODO_RECIPIENT_A, TODO_RECIPIENT_B],
     shares: [5000, 5000],
   },
@@ -59,7 +55,6 @@ const CONFIGS: Record<string, ChainConfig> = {
     price: 62,
     usdtDecimals: 6, // Polygon USDT = 6 decimals
     usdtAddress: TODO_USDT, // TODO: Polygon USDT (verify on polygonscan)
-    treasury: TODO_TREASURY, // TODO: mint-revenue treasury (multisig)
     recipients: [TODO_RECIPIENT_A, TODO_RECIPIENT_B],
     shares: [5000, 5000],
   },
@@ -81,8 +76,6 @@ function loadConfig(): { key: string; cfg: ChainConfig } {
     throw new Error("recipients and shares length mismatch");
   if (cfg.usdtAddress === TODO_USDT)
     throw new Error(`❌ Fill in + verify the USDT address for "${key}" before deploying`);
-  if (cfg.treasury === TODO_TREASURY)
-    throw new Error(`❌ Fill in the treasury address for "${key}" before deploying`);
   if (cfg.recipients.includes(TODO_RECIPIENT_A) || cfg.recipients.includes(TODO_RECIPIENT_B))
     throw new Error(`❌ Fill in real royalty recipients for "${key}" before deploying`);
 
@@ -110,8 +103,7 @@ async function main() {
     cfg.usdtAddress,
     cfg.usdtDecimals,
     cfg.price,
-    splitterAddress,
-    cfg.treasury
+    splitterAddress
   );
   await nft.waitForDeployment();
   const nftAddress = await nft.getAddress();
@@ -123,8 +115,7 @@ async function main() {
   console.log(`  Price:        ${cfg.price} USDT`);
   console.log(`  USDT decimals:${cfg.usdtDecimals}`);
   console.log(`  USDT address: ${cfg.usdtAddress}`);
-  console.log(`  Treasury:     ${cfg.treasury} (mint revenue)`);
-  console.log(`  Royalty:      5% -> ${splitterAddress}`);
+  console.log(`  Splitter:     ${splitterAddress} (mint revenue + 5% royalty)`);
 
   console.log("\n📋 Next steps:");
   console.log("  1. setBaseURI(1|2|3, uri) for each metadata state (public placeholder only)");

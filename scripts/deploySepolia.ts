@@ -4,7 +4,7 @@
  *   npx tsx scripts/deploySepolia.ts
  *
  * Requires: SEPOLIA_RPC_URL, SEPOLIA_PRIVATE_KEY, ETHERSCAN_API_KEY
- *           ROYALTY_RECIPIENT_1/2/3, optional TREASURY
+ *           ROYALTY_RECIPIENT_1/2/3
  */
 import * as dotenv from "dotenv";
 dotenv.config();
@@ -70,13 +70,8 @@ async function main() {
     requireEnv("ROYALTY_RECIPIENT_3"),
   ];
   const shares = [3333n, 3333n, 3334n];
-  const treasury =
-    process.env.TREASURY && !process.env.TREASURY.startsWith("0x...")
-      ? process.env.TREASURY
-      : deployer.address;
 
   console.log(`Deployer: ${deployer.address}`);
-  console.log(`Treasury: ${treasury}`);
   console.log(`Balance:  ${ethers.formatEther(await provider.getBalance(deployer.address))} ETH`);
 
   const MockUSDT = loadArtifact("MockUSDT");
@@ -118,8 +113,7 @@ async function main() {
     usdtAddress,
     USDT_DECIMALS,
     PRICE,
-    splitterAddress,
-    treasury
+    splitterAddress
   );
   await nft.waitForDeployment();
   const nftAddress = await nft.getAddress();
@@ -154,18 +148,8 @@ async function main() {
         "uint8",
         "uint256",
         "address",
-        "address",
       ],
-      [
-        NAME,
-        SYMBOL,
-        TIER,
-        usdtAddress,
-        USDT_DECIMALS,
-        PRICE,
-        splitterAddress,
-        treasury,
-      ]
+      [NAME, SYMBOL, TIER, usdtAddress, USDT_DECIMALS, PRICE, splitterAddress]
     )
   );
 

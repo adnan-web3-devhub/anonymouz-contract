@@ -20,7 +20,6 @@ contract LumanaNFTTest is Test {
     address owner = address(1);
     address user = address(2);
     address updater = address(3);
-    address treasury = address(4);
 
     uint256 constant CHRISTMAS_TS = 1798132800;
     uint256 constant INDEPENDENCE_TS = 1811830800;
@@ -57,8 +56,7 @@ contract LumanaNFTTest is Test {
                 usdtAddr,
                 decimals,
                 price,
-                address(splitter),
-                treasury
+                address(splitter)
             );
     }
 
@@ -102,22 +100,7 @@ contract LumanaNFTTest is Test {
     function testConstructorRevertsZeroSplitter() public {
         vm.prank(owner);
         vm.expectRevert(LumanaNFT.ZeroAddress.selector);
-        new LumanaNFT("L", "L", 1, address(usdt), 6, 1, address(0), treasury);
-    }
-
-    function testConstructorRevertsZeroTreasury() public {
-        vm.prank(owner);
-        vm.expectRevert(LumanaNFT.ZeroAddress.selector);
-        new LumanaNFT(
-            "L",
-            "L",
-            1,
-            address(usdt),
-            6,
-            1,
-            address(splitter),
-            address(0)
-        );
+        new LumanaNFT("L", "L", 1, address(usdt), 6, 1, address(0));
     }
 
     function testConstructorRevertsZeroPrice() public {
@@ -169,13 +152,15 @@ contract LumanaNFTTest is Test {
         vm.prank(owner);
         LumanaNFT t3 = _deployNft(3, address(usdt), 6, 62);
 
+        // Pay from a non-recipient so the full price leaves the buyer's wallet.
+        address buyer = address(0xB0B);
         uint256 expected = 62 * 1 * (10 ** 6); // 62_000_000
-        vm.startPrank(user);
-        usdt.mint(user, expected);
+        vm.startPrank(buyer);
+        usdt.mint(buyer, expected);
         usdt.approve(address(t3), expected);
-        uint256 balBefore = usdt.balanceOf(user);
+        uint256 balBefore = usdt.balanceOf(buyer);
         t3.mintWithUSDT(1);
-        assertEq(balBefore - usdt.balanceOf(user), expected);
+        assertEq(balBefore - usdt.balanceOf(buyer), expected);
         vm.stopPrank();
     }
 
@@ -187,13 +172,15 @@ contract LumanaNFTTest is Test {
         uint256 expected = 620 * 1 * (10 ** 18); // 620e18
         assertEq(t2.usdtDecimals(), 18);
 
-        vm.startPrank(user);
-        usdt18.mint(user, expected);
+        // Pay from a non-recipient so the full price leaves the buyer's wallet.
+        address buyer = address(0xB0B);
+        vm.startPrank(buyer);
+        usdt18.mint(buyer, expected);
         usdt18.approve(address(t2), expected);
-        uint256 balBefore = usdt18.balanceOf(user);
+        uint256 balBefore = usdt18.balanceOf(buyer);
         t2.mintWithUSDT(1);
-        assertEq(balBefore - usdt18.balanceOf(user), expected);
-        assertEq(t2.ownerOf(1), user);
+        assertEq(balBefore - usdt18.balanceOf(buyer), expected);
+        assertEq(t2.ownerOf(1), buyer);
         vm.stopPrank();
     }
 
@@ -335,40 +322,114 @@ contract LumanaNFTTest is Test {
         assertEq(usdt.balanceOf(address(splitter)), 500000);
     }
 
-    // ----------------------------------------- H2 REGRESSION (treasury split)
+    // ----------------------- UNIFIED FLOW: mint auto-pushes to wallets in-tx
 
-    function testH2MintRevenueGoesToTreasuryNotSplitter() public {
+    /// @dev mintWithUSDT forwards payment to the splitter, which PUSHES each recipient's
+    ///      share straight to their wallet in the SAME tx — no pending balances, no withdraw.
+    function testMintAutoPushesToRecipients() public {
+        // Recipients are owner (50%) and user (50%); user is also the payer.
+        uint256 ownerBefore = usdt.balanceOf(owner);
+        uint256 userBefore = usdt.balanceOf(user);
+
         vm.startPrank(user);
         usdt.approve(address(nft), 1 * 10 ** 6);
         nft.mintWithUSDT(1);
         vm.stopPrank();
 
-        uint256 treasuryBefore = usdt.balanceOf(treasury);
-
-        vm.expectEmit(true, false, false, true, address(nft));
-        emit LumanaNFT.Withdrawn(treasury, 1 * 10 ** 6);
-        vm.prank(owner);
-        nft.withdrawUSDT();
-
-        // Mint revenue landed in treasury, not the splitter.
-        assertEq(usdt.balanceOf(treasury) - treasuryBefore, 1 * 10 ** 6);
+        // Nothing is held by the NFT or left sitting in the splitter.
         assertEq(usdt.balanceOf(address(nft)), 0);
         assertEq(usdt.balanceOf(address(splitter)), 0);
 
-        // Recipients cannot claim mint funds from the splitter: nothing arrived there.
-        vm.expectRevert(RoyaltySplitter.NothingToDistribute.selector);
-        splitter.distributeERC20(IERC20(address(usdt)));
+        // Each recipient's share landed directly in their wallet.
+        assertEq(usdt.balanceOf(owner) - ownerBefore, 500000);
+        // user paid 1 USDT then received their 0.5 USDT share back (net -0.5).
+        assertEq(userBefore - usdt.balanceOf(user), 500000);
+
+        // No pending balances exist under the push model.
+        assertEq(splitter.getPendingERC20(owner, IERC20(address(usdt))), 0);
         assertEq(splitter.getPendingERC20(user, IERC20(address(usdt))), 0);
     }
 
-    function testSetTreasury() public {
-        vm.prank(owner);
-        nft.setTreasury(address(99));
-        assertEq(nft.treasury(), address(99));
+    /// @dev After the push on mint, the splitter holds nothing, so there is no surplus to
+    ///      rescue — proving mint revenue went to recipients, not the splitter.
+    function testMintLeavesNoSweepableSurplus() public {
+        vm.startPrank(user);
+        usdt.approve(address(nft), 1 * 10 ** 6);
+        nft.mintWithUSDT(1);
+        vm.stopPrank();
 
         vm.prank(owner);
-        vm.expectRevert(LumanaNFT.ZeroAddress.selector);
-        nft.setTreasury(address(0));
+        vm.expectRevert(RoyaltySplitter.NoSurplus.selector);
+        splitter.rescueERC20(IERC20(address(usdt)), owner);
+    }
+
+    /// @dev withdrawUSDT remains a safety sweep for USDT sent to the NFT by mistake:
+    ///      it routes the stray balance to the splitter, which pushes it to wallets.
+    function testWithdrawUSDTSweepsStrayUSDT() public {
+        uint256 ownerBefore = usdt.balanceOf(owner);
+        uint256 userBefore = usdt.balanceOf(user);
+
+        // Simulate USDT accidentally sent directly to the NFT contract.
+        vm.prank(user);
+        usdt.transfer(address(nft), 1 * 10 ** 6);
+
+        vm.expectEmit(true, false, false, true, address(nft));
+        emit LumanaNFT.Withdrawn(address(splitter), 1 * 10 ** 6);
+        vm.prank(owner);
+        nft.withdrawUSDT();
+
+        assertEq(usdt.balanceOf(address(nft)), 0);
+        assertEq(usdt.balanceOf(address(splitter)), 0);
+        assertEq(usdt.balanceOf(owner) - ownerBefore, 500000);
+        // user sent away 1 USDT, then got their 0.5 USDT share pushed back (net -0.5).
+        assertEq(userBefore - usdt.balanceOf(user), 500000);
+    }
+
+    /// @dev Push path drains any rounding dust to the LAST recipient so the splitter is
+    ///      fully emptied even when the amount isn't perfectly divisible by the shares.
+    function testPushSendsDustToLastRecipient() public {
+        // 3-way splitter with uneven shares so integer division leaves dust.
+        address r3 = address(99);
+        address[] memory recipients = new address[](3);
+        recipients[0] = owner;
+        recipients[1] = user;
+        recipients[2] = r3;
+        uint256[] memory shares = new uint256[](3);
+        shares[0] = 3333;
+        shares[1] = 3333;
+        shares[2] = 3334;
+        vm.prank(owner);
+        RoyaltySplitter sp = new RoyaltySplitter(recipients, shares);
+
+        uint256 ownerBefore = usdt.balanceOf(owner);
+        uint256 r3Before = usdt.balanceOf(r3);
+
+        // Send 100 wei: shares give 33/33/34 -> 1 wei dust to last recipient.
+        vm.prank(user);
+        usdt.transfer(address(sp), 100);
+        sp.distributeERC20Push(IERC20(address(usdt)));
+
+        assertEq(usdt.balanceOf(address(sp)), 0); // fully drained
+        assertEq(usdt.balanceOf(owner) - ownerBefore, 33);
+        assertEq(usdt.balanceOf(r3) - r3Before, 34); // remainder + dust
+    }
+
+    /// @dev Secondary path: USDT paid directly to the splitter (e.g. by a marketplace) can
+    ///      still be credited pull-based via distributeERC20 / withdrawERC20.
+    function testSecondaryRoyaltyDirectInflowCreditedByShare() public {
+        vm.prank(user);
+        usdt.transfer(address(splitter), 2 * 10 ** 6);
+
+        splitter.distributeERC20(IERC20(address(usdt)));
+
+        assertEq(splitter.getPendingERC20(owner, IERC20(address(usdt))), 1_000_000);
+        assertEq(splitter.getPendingERC20(user, IERC20(address(usdt))), 1_000_000);
+    }
+
+    function testWithdrawUSDTZeroBalanceReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(LumanaNFT.NothingToWithdraw.selector);
+        nft.withdrawUSDT();
     }
 
     // ---------------------------------------------------- SPLITTER RESCUE
@@ -431,26 +492,24 @@ contract LumanaNFTTest is Test {
             address(ncusdt),
             6,
             10,
-            address(sp),
-            treasury
+            address(sp)
         );
 
         uint256 cost = 10 * 10 ** 6;
         ncusdt.mint(user, cost);
 
-        // mint (safeTransferFrom) works despite no return data
+        // mint (safeTransferFrom + auto-push) works despite no return data:
+        // payment is forwarded to the splitter and pushed to wallets in the same tx.
         vm.startPrank(user);
         ncusdt.approve(address(n), cost);
         n.mintWithUSDT(1);
         vm.stopPrank();
         assertEq(n.ownerOf(1), user);
-        assertEq(ncusdt.balanceOf(address(n)), cost);
-
-        // withdrawUSDT (safeTransfer) works
-        vm.prank(owner);
-        n.withdrawUSDT();
-        assertEq(ncusdt.balanceOf(treasury), cost);
         assertEq(ncusdt.balanceOf(address(n)), 0);
+        assertEq(ncusdt.balanceOf(address(sp)), 0);
+        // Shares pushed straight to recipient wallets (owner 50%, user 50%).
+        assertEq(ncusdt.balanceOf(owner), 5 * 10 ** 6);
+        assertEq(ncusdt.balanceOf(user), 5 * 10 ** 6); // paid 10, got 5 back
     }
 
     function testC1SplitterWithdrawalsAgainstNonCompliantUSDT() public {
