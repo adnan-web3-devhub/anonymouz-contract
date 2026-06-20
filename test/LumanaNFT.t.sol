@@ -50,7 +50,7 @@ contract LumanaNFTTest is Test {
     ) internal returns (LumanaNFT) {
         return
             new LumanaNFT(
-                "LumanaNFT",
+                "4 THA LUMANA'I",
                 "LUM",
                 tier,
                 usdtAddr,

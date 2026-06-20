@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { ethers } from "ethers";
 
-const NAME = "THA LUMANA'I";
+const NAME = "4 THA LUMANA'I";
 const SYMBOL = "LUMANA";
 const TIER = 1;
 const PRICE = 6200n;

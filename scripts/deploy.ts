@@ -16,7 +16,7 @@ import { ethers } from "hardhat";
  *     address on that chain's block explorer before deploying. Do NOT trust these.
  */
 
-const NAME = "THA LUMANA'I";
+const NAME = "4 THA LUMANA'I";
 const SYMBOL = "LUMANA";
 
 type ChainConfig = {

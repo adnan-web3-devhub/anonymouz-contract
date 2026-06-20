@@ -15,7 +15,7 @@ interface IRoyaltySplitter {
     function distributeERC20Push(IERC20 token) external;
 }
 
-/// @title LumanaNFT - Dynamic NFT for "THA LUMANA'I"
+/// @title LumanaNFT - Dynamic NFT for "4 THA LUMANA'I"
 /// @notice ERC-721 with USDT minting, date-driven metadata states, and royalty support.
 /// @dev One tier per deployment. The same bytecode is deployed once per chain, each
 ///      carrying a single immutable tier and a single per-chain price/USDT config.
